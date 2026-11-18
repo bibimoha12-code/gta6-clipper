@@ -23,6 +23,9 @@ CHUNK_SEC = 12 * 60
 YTDLP = [sys.executable, "-m", "yt_dlp", "--no-warnings", "--quiet", "--no-progress"]
 # tools installed inside the venv (deno on Linux) must be findable by yt-dlp
 os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
+# ffmpeg ignores HTTPS_PROXY and only reads http_proxy (used for https URLs too)
+if os.environ.get("HTTPS_PROXY") and not os.environ.get("http_proxy"):
+    os.environ["http_proxy"] = os.environ["HTTPS_PROXY"]
 GTA_RE = re.compile(r"\bgta\s*(6|vi)\b|grand theft auto\s*(6|vi)\b", re.I)
 
 
@@ -223,7 +226,7 @@ def chat_spikes(chat_file):
 
 def transcribe(wav, out_base, words=False):
     model = CFG.get("whisper_model") or os.path.expanduser("~/.cache/whisper-cpp/ggml-small.bin")
-    cmd = [CFG.get("whisper_cli") or "whisper-cli", "-m", model, "-f", str(wav), "-l", "en", "-np", "-mc", "0", "-oj", "-of", str(out_base)]
+    cmd = [CFG.get("whisper_cli") or "whisper-cli", "-m", model, "-f", str(wav), "-l", CFG.get("whisper_lang") or "en", "-np", "-mc", "0", "-oj", "-of", str(out_base)]
     if words:
         cmd += ["-ml", "1", "-sow", "-ojf"]
     r = run(cmd)

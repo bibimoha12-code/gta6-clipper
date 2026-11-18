@@ -66,3 +66,8 @@ Most chunks have 0-2 real candidates. Many have none. That's normal: write `[]`.
 - `title`: post title (YouTube Shorts / TikTok), sentence case, under 70 characters.
 - `caption`: 1-2 short lines + a question that gets comments. No links.
 - `hashtags`: 4-6. Always `#GTA6` and the streamer's name tag.
+
+## Language
+
+Write `hook`, `title` and `caption` in the stream's language (a Spanish stream gets Spanish hooks and
+captions). Hashtags can mix: keep `#GTA6` and the streamer tag, add 1-2 in the stream's language.

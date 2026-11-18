@@ -71,17 +71,21 @@ PKGS=("yt-dlp[default]" opencv-python-headless pillow numpy)
 "$UV" pip install --python "$VENV/bin/python" -q -U "${PKGS[@]}" >/dev/null 2>&1 \
   && ok "Python packages (${PKGS[*]})" || fail "Python packages"
 
-# 5. Whisper model (speech -> text, runs on this Mac). Reuse an existing one if present.
+# 5. Whisper model (speech -> text, runs on this machine). Reuse an existing one if present.
+#    GTA6_LANG=en (default) uses the English-only model; any other code (es, pt, fr, auto...) uses the
+#    multilingual one, e.g.  GTA6_LANG=es bash setup.sh
+LANG_CODE="${GTA6_LANG:-en}"
+if [[ "$LANG_CODE" == "en" ]]; then MNAME="ggml-small.en.bin"; else MNAME="ggml-small.bin"; fi
 WHISPER_MODEL=""
-for m in "$MODELS/ggml-small.en.bin" "$MODELS/ggml-small.bin" "$HOME/.cache/whisper-cpp/ggml-small.en.bin" "$HOME/.cache/whisper-cpp/ggml-small.bin"; do
+for m in "$MODELS/$MNAME" "$HOME/.cache/whisper-cpp/$MNAME"; do
   [[ -f "$m" ]] && WHISPER_MODEL="$m" && break; done
 if [[ -z "$WHISPER_MODEL" ]]; then
-  inst "Whisper small.en model (~465 MB)"
-  curl -fL -s -o "$MODELS/ggml-small.en.bin.part" https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin \
-    && mv "$MODELS/ggml-small.en.bin.part" "$MODELS/ggml-small.en.bin" && WHISPER_MODEL="$MODELS/ggml-small.en.bin" \
-    || { rm -f "$MODELS/ggml-small.en.bin.part"; fail "whisper model (needs access to huggingface.co)"; }
+  inst "Whisper $MNAME model (~465 MB)"
+  curl -fL -s -o "$MODELS/$MNAME.part" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$MNAME" \
+    && mv "$MODELS/$MNAME.part" "$MODELS/$MNAME" && WHISPER_MODEL="$MODELS/$MNAME" \
+    || { rm -f "$MODELS/$MNAME.part"; fail "whisper model (needs access to huggingface.co)"; }
 fi
-[[ -n "$WHISPER_MODEL" ]] && ok "Whisper model: $WHISPER_MODEL"
+[[ -n "$WHISPER_MODEL" ]] && ok "Whisper model ($LANG_CODE): $WHISPER_MODEL"
 
 # 6. Face detector model (YuNet, ~230 KB) used to find the facecam box
 YUNET="$MODELS/face_detection_yunet_2023mar.onnx"
@@ -104,7 +108,7 @@ FREE_GB=$(df -Pk "$SKILL_DIR" | awk 'NR==2{print int($4/1048576)}')
 if (( FREE_GB < 3 )); then echo "  [warn]    Only ${FREE_GB} GB free. Each stream needs ~0.5-1 GB while it runs."; else ok "Disk space (${FREE_GB} GB free)"; fi
 
 cat > "$SKILL_DIR/config.json" <<EOF
-{"whisper_model": "$WHISPER_MODEL", "yunet_model": "$YUNET", "whisper_cli": "$WHISPER_CLI"}
+{"whisper_model": "$WHISPER_MODEL", "yunet_model": "$YUNET", "whisper_cli": "$WHISPER_CLI", "whisper_lang": "$LANG_CODE"}
 EOF
 
 if [[ $FAILED -eq 0 ]]; then
