@@ -241,6 +241,23 @@ def transcribe(wav, out_base, words=False):
     return segs
 
 
+def download_audio(url, cookies, rd, meta):
+    """Audio-only download. Twitch VODs are HLS: hand the playlist straight to ffmpeg, reading from the
+    first segment (a VOD that is still recording is an EVENT playlist, which yt-dlp would fetch at
+    real-time speed). Everything else goes through yt-dlp."""
+    if "twitch" in (meta.get("extractor_key") or "").lower():
+        g = run(YTDLP + cookie_args(cookies) + ["-f", "Audio_Only/audio_only/worst", "-g", url])
+        hls = g.stdout.strip().splitlines()[-1] if g.returncode == 0 and g.stdout.strip() else ""
+        if hls:
+            dur = ["-t", str(int(meta["duration"]))] if meta.get("duration") else []
+            r = run(["ffmpeg", "-y", "-loglevel", "error", "-live_start_index", "0", "-i", hls, *dur,
+                     "-vn", "-c:a", "copy", str(rd / "audio.m4a")])
+            if r.returncode == 0:
+                return r
+    return run(YTDLP + cookie_args(cookies) + ["--no-playlist", "-N", "8", "-f", "bestaudio/Audio_Only/audio_only/worst",
+                                               "-o", str(rd / "audio.%(ext)s"), url])
+
+
 def prep_one(url, cookies, force=False):
     t0 = time.time()
     meta = ytdlp_json(url, cookies, ["--no-playlist"])
@@ -262,8 +279,7 @@ def prep_one(url, cookies, force=False):
     log(f"[{streamer}] 1/2 downloading audio only ({hms(meta.get('duration') or 0)} stream)")
     is_yt = "youtube" in (meta.get("extractor_key") or "").lower()
     with cf.ThreadPoolExecutor(2) as ex:
-        fa = ex.submit(run, YTDLP + cookie_args(cookies) + ["--no-playlist", "-f", "bestaudio/audio_only/worst",
-                                                             "-o", str(rd / "audio.%(ext)s"), url])
+        fa = ex.submit(download_audio, url, cookies, rd, meta)
         fc = ex.submit(run, YTDLP + cookie_args(cookies) + ["--no-playlist", "--skip-download", "--write-subs",
                                                              "--sub-langs", "live_chat", "-o", str(rd / "chat"), url]) if is_yt else None
         ra = fa.result()
