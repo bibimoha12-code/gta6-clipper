@@ -700,6 +700,47 @@ def clip_words(src, ss, dur, work):
     return words
 
 
+def twitch_section(url, cookies, a, b, work):
+    """Twitch VOD: read the HLS playlist and fetch only the 10-second pieces covering [a, b], then join them.
+    Much faster and sturdier than seeking with ffmpeg on an 8-hour playlist. Returns (file, real_start)."""
+    g = run(YTDLP + cookie_args(cookies) + ["-f", "bv*[height<=1080][fps<=60]+ba/b[height<=1080]/b", "-g", url])
+    m3u8 = (g.stdout.strip().splitlines() or [""])[0]
+    if g.returncode != 0 or ".m3u8" not in m3u8:
+        return None
+    base = m3u8.rsplit("/", 1)[0] + "/"
+    pl = run(["curl", "-fsSL", "--retry", "3", m3u8])
+    if pl.returncode != 0:
+        return None
+    t, dur, init, picked = 0.0, None, None, []
+    for ln in pl.stdout.splitlines():
+        if ln.startswith("#EXT-X-MAP:"):
+            m = re.search(r'URI="([^"]+)"', ln)
+            init = m.group(1) if m else None
+        elif ln.startswith("#EXTINF:"):
+            dur = float(ln[8:].split(",")[0])
+        elif ln and not ln.startswith("#") and dur is not None:
+            if t + dur > a and t < b:
+                picked.append((t, init, ln))
+            t += dur
+            dur = None
+    if not picked:
+        return None
+    raw = work / "src_raw.mp4" if picked[0][1] else work / "src_raw.ts"
+    with open(raw, "wb") as out:
+        last_init = None
+        for _, ini, seg in picked:
+            for part in ([ini] if ini and ini != last_init else []) + [seg]:
+                r = subprocess.run(["curl", "-fsSL", "--retry", "3", base + part], capture_output=True)
+                if r.returncode != 0:
+                    return None
+                out.write(r.stdout)
+            last_init = ini
+    src = work / "src.mp4"
+    r = run(["ffmpeg", "-y", "-loglevel", "error", "-fflags", "+genpts", "-i", str(raw), "-c", "copy", str(src)])
+    raw.unlink(missing_ok=True)
+    return (src, picked[0][0]) if r.returncode == 0 and src.exists() else None
+
+
 def render_one(rd, info, c, n, cookies, keep, local_src=None, src_start=None):
     """local_src/src_start: a file already on disk that starts at stream time src_start
     (the live clipper cuts from its buffer instead of downloading)."""
@@ -712,6 +753,13 @@ def render_one(rd, info, c, n, cookies, keep, local_src=None, src_start=None):
     if local_src is not None:
         a = src_start
     src = Path(local_src) if local_src is not None else next(work.glob("src.*"), None)
+    if src and (work / "src_start.txt").exists():
+        a = float((work / "src_start.txt").read_text())
+    if not src and "twitch" in (info.get("platform") or "").lower():
+        got = twitch_section(info["webpage_url"], cookies, a, b, work)
+        if got is not None:
+            src, a = got
+            (work / "src_start.txt").write_text(str(a))
     if not src:
         r = run(YTDLP + cookie_args(cookies) + ["--no-playlist", "-f",
                 "bv*[height<=1080][fps<=60]+ba/b[height<=1080]/bv*+ba/b", "--download-sections", f"*{a:.1f}-{b:.1f}",
