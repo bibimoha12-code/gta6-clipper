@@ -289,6 +289,61 @@ def transcribe_range(wav, a, b, pdir, name):
     return [{"start": sg["start"] + a, "end": sg["end"] + a, "text": sg["text"]} for sg in json.loads(done.read_text())]
 
 
+TWITCH_GQL = "https://gql.twitch.tv/gql"
+TWITCH_WEB_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"  # the public client id twitch.tv's own player uses
+TWITCH_COMMENTS_HASH = "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a"
+
+
+def twitch_vod_chat_peaks(video_id, dur, step=20, cache=None):
+    """Chat replay of a Twitch VOD, sampled every `step` s (the replay the twitch.tv player shows).
+    Each sample's density = weighted messages per second (laughs count double). Returns chat
+    explosions as candidates [{start, end, x, laugh, db}] strongest first; [] if chat can't be read."""
+    vid = str(video_id).lstrip("v")
+    samples = json.loads(Path(cache).read_text()) if cache and Path(cache).exists() else {}
+    for off in range(0, int(dur), step):
+        if str(off) in samples:
+            continue
+        body = json.dumps([{"operationName": "VideoCommentsByOffsetOrCursor",
+                            "variables": {"videoID": vid, "contentOffsetSeconds": off},
+                            "extensions": {"persistedQuery": {"version": 1, "sha256Hash": TWITCH_COMMENTS_HASH}}}])
+        r = run(["curl", "-fsS", "--retry", "2", "-m", "20", TWITCH_GQL, "-H", f"Client-Id: {TWITCH_WEB_CLIENT_ID}",
+                 "-H", "Content-Type: application/json", "-d", body])
+        try:
+            edges = json.loads(r.stdout)[0]["data"]["video"]["comments"]["edges"]
+        except Exception:
+            if not samples:
+                log("  twitch chat replay not readable, falling back to loudness")
+                return []
+            continue
+        ev = []
+        for e in edges:
+            n = e["node"]
+            txt = "".join(f.get("text") or "" for f in n["message"]["fragments"])
+            ev.append((n["contentOffsetSeconds"], chat_weight(txt)))
+        ev = [x for x in ev if off <= x[0] < off + step]
+        span = max(5, (max(t for t, _ in ev) - off + 1)) if ev else step
+        samples[str(off)] = [round(sum(w for _, w in ev) / span, 3),
+                             round(sum(w for _, w in ev if w > 1) / max(1, sum(w for _, w in ev)), 2)]
+        if cache and len(samples) % 50 == 0:
+            Path(cache).write_text(json.dumps(samples))
+            log(f"    chat: {len(samples)}/{int(dur) // step} samples")
+        time.sleep(0.15)
+    if cache:
+        Path(cache).write_text(json.dumps(samples))
+    offs = sorted(int(k) for k in samples)
+    dens = [samples[str(o)][0] for o in offs]
+    out = []
+    for i, o in enumerate(offs):
+        base = max(0.05, statistics.median(dens[max(0, i - 15):i + 15]))
+        x = dens[i] / base
+        if x >= 2.0:
+            laugh = samples[str(o)][1] >= 0.5
+            # chat reacts after the moment: centre the window ~15 s before the burst
+            out.append({"start": max(0, o - 15), "end": o + 5, "x": round(x, 1), "laugh": laugh,
+                        "db": round(x * (1.5 if laugh else 1), 1)})
+    return sorted(out, key=lambda e: e["db"], reverse=True)
+
+
 def quick_candidates(loud):
     """Loud moments worth a look, strongest first. A real yell rises 9-30 dB over the streamer's normal
     talking level; a jump of 30+ dB, or one from a near-silent baseline, is music or a cutscene starting
@@ -344,7 +399,7 @@ def download_audio(url, cookies, rd, meta):
                                                "-o", str(rd / "audio.%(ext)s"), url])
 
 
-def prep_one(url, cookies, force=False, quick=0):
+def prep_one(url, cookies, force=False, quick=0, chat=False):
     t0 = time.time()
     meta = ytdlp_json(url, cookies, ["--no-playlist"])
     if meta.get("live_status") == "is_live" and meta.get("extractor_key", "").lower().startswith("youtube"):
@@ -388,7 +443,14 @@ def prep_one(url, cookies, force=False, quick=0):
         loud, _ = loud_moments(wav)
         dur_ = meta.get("duration") or 1e9
         ranges, segs, tried = [], [], 0
-        for e in quick_candidates(loud):
+        cands = quick_candidates(loud)
+        if chat and "twitch" in (meta.get("extractor_key") or "").lower():
+            log(f"[{streamer}]   reading the chat replay (every 20 s)")
+            peaks = twitch_vod_chat_peaks(meta.get("id"), meta.get("duration") or 0, cache=rd / "chat_samples.json")
+            (rd / "chat_peaks.json").write_text(json.dumps(peaks[:100], indent=1))
+            if peaks:
+                cands = peaks
+        for e in cands:
             if len(ranges) >= quick or tried >= quick * 3:
                 break
             if any(abs(e["start"] - (a_ + 90)) < 180 for a_, _ in ranges):
@@ -456,7 +518,7 @@ def cmd_prep(a):
     RUNS.mkdir(parents=True, exist_ok=True)
     results = []
     with cf.ThreadPoolExecutor(a.jobs) as ex:
-        futs = {ex.submit(prep_one, u, a.cookies, a.force, a.quick): u for u in a.urls}
+        futs = {ex.submit(prep_one, u, a.cookies, a.force, a.quick, a.chat): u for u in a.urls}
         for f in cf.as_completed(futs):
             try:
                 results.append(f.result())
@@ -875,6 +937,8 @@ def main():
     pr.add_argument("--force", action="store_true")
     pr.add_argument("--quick", type=int, default=0, metavar="N",
                     help="fast mode: skip the full transcript, only transcribe around the N loudest moments")
+    pr.add_argument("--chat", action="store_true",
+                    help="with --quick on a Twitch VOD: pick the moments where the chat replay explodes")
     s = sp.add_parser("status"); s.add_argument("run")
     r = sp.add_parser("render"); r.add_argument("run")
     r.add_argument("--top", type=int, default=3); r.add_argument("--min-score", type=float, default=7.0)
