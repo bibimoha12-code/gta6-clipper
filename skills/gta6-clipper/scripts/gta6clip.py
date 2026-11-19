@@ -650,7 +650,8 @@ def render_one(rd, info, c, n, cookies, keep, local_src=None, src_start=None):
     ss = min(c["_s"] - a, max(0, sdur - 5))
     dur = min(c["_e"] - c["_s"], sdur - ss)
 
-    fc = find_facecam(src, W, H)
+    box = c.get("facecam_box")  # [left, top, width, height] in source pixels, when detection picks the wrong face
+    fc = {"mode": "facecam", "box": [int(v) for v in box]} if box else find_facecam(src, W, H)
     forced = c.get("layout")  # per-pick override when the detector gets it wrong (scene switches mid-clip)
     if forced == "gameplay" or (forced == "cam" and "face" not in fc):
         fc = {"mode": "gameplay"}

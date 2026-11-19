@@ -74,7 +74,9 @@ Remind the user: watch every clip before posting, and only clip streamers who ar
 - "Give me 5 clips": `render <run> --top 5`.
 - Check one frame per clip after render. If the top panel shows the wrong face (the stream switches between
   full-screen layouts mid-clip, or a face on screen gets mistaken for the facecam), add `"layout": "gameplay"`
-  (or `"cam"`) to that pick in `picks/*.json`, delete its mp4 and re-run render.
+  (or `"cam"`) to that pick in `picks/*.json`, delete its mp4 and re-run render. If the real facecam is
+  visible but a different face was picked (e.g. character art on a menu), set
+  `"facecam_box": [left, top, width, height]` in source-video pixels instead.
 - Disk: prep deletes the audio after transcribing and render deletes downloaded sections (`--keep` keeps
   them). Runs live in `~/GTA6-Clips/` (or `$GTA6_CLIPS_DIR`); delete finished ones only if the user says so.
 
