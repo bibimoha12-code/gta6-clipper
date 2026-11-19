@@ -27,6 +27,9 @@ failing (it updates yt-dlp).
   show the list, then `prep` all of the URLs it printed. Don't wait for approval unless the user asked to choose.
 - Age-restricted YouTube streams (common with GTA) and Kick need the browser login: add `--cookies chrome`
   (or safari/firefox). If a download fails with "Sign in to confirm your age" / 403, retry with it.
+- `--quick N` skips the full transcript: it finds the N loudest moments (default off; 20 is a good value for
+  long streams) and only transcribes ~2.5 min around each. Minutes instead of an hour for an 8 h stream, but
+  quiet good moments are missed. Each window becomes one chunk; picking and render work as usual.
 - `--jobs 2` (default) preps 2 streams at once. Don't go higher on a 16 GB Mac.
 - Long streams take a while (4 h stream: a few min download + ~8-12 min transcript). Run prep in the
   background for 2+ streams and tell the user it's running.

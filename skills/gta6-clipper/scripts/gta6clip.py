@@ -275,6 +275,40 @@ def _whisper(wav, out_base, words=False):
     return segs
 
 
+def transcribe_range(wav, a, b, pdir, name):
+    """Transcribe only [a, b) seconds of a long wav (cached per window)."""
+    pdir = Path(pdir)
+    pdir.mkdir(exist_ok=True)
+    done = pdir / f"{name}.done.json"
+    if not done.exists():
+        pw = pdir / f"{name}.wav"
+        run(["ffmpeg", "-y", "-loglevel", "error", "-ss", str(a), "-t", str(b - a), "-i", str(wav), "-c", "copy", str(pw)])
+        part = _whisper(pw, pdir / name)
+        pw.unlink(missing_ok=True)
+        done.write_text(json.dumps(part))
+    return [{"start": sg["start"] + a, "end": sg["end"] + a, "text": sg["text"]} for sg in json.loads(done.read_text())]
+
+
+def quick_windows(loud, n, dur=None, before=90, after=60, gap=180):
+    """Pick the n strongest loud moments (longer + louder first), at least `gap` s apart, and return
+    merged [start, end) windows around them, in stream order."""
+    ranked = sorted(loud, key=lambda e: e["db"] + min(e["end"] - e["start"], 6), reverse=True)
+    chosen = []
+    for e in ranked:
+        if all(abs(e["start"] - c["start"]) >= gap for c in chosen):
+            chosen.append(e)
+        if len(chosen) >= n:
+            break
+    wins = sorted((max(0, e["start"] - before), min(dur or 1e9, e["end"] + after)) for e in chosen)
+    merged = []
+    for a, b in wins:
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
 def transcribe(wav, out_base, words=False):
     """Long audio is transcribed in 10-minute pieces, each saved as it finishes, so an interrupted
     prep picks up where it stopped instead of starting the whole stream again."""
@@ -316,7 +350,7 @@ def download_audio(url, cookies, rd, meta):
                                                "-o", str(rd / "audio.%(ext)s"), url])
 
 
-def prep_one(url, cookies, force=False):
+def prep_one(url, cookies, force=False, quick=0):
     t0 = time.time()
     meta = ytdlp_json(url, cookies, ["--no-playlist"])
     if meta.get("live_status") == "is_live" and meta.get("extractor_key", "").lower().startswith("youtube"):
@@ -355,12 +389,22 @@ def prep_one(url, cookies, force=False):
         src.unlink(missing_ok=True)
     t_dl = time.time()
 
-    log(f"[{streamer}] 2/2 transcribing on this Mac + scanning for loud moments and chat spikes")
-    with cf.ThreadPoolExecutor(2) as ex:
-        fs = ex.submit(transcribe, wav, rd / "whisper")
-        fl = ex.submit(loud_moments, wav)
-        segs = fs.result()
-        loud, _ = fl.result()
+    if quick:
+        log(f"[{streamer}] 2/2 quick mode: finding the loudest moments, transcribing only around the top {quick}")
+        loud, _ = loud_moments(wav)
+        ranges = quick_windows(loud, quick, meta.get("duration"))
+        segs = []
+        for i, (a_, b_) in enumerate(ranges):
+            log(f"    window {i + 1}/{len(ranges)}  {hms(a_)}-{hms(b_)}")
+            segs += transcribe_range(wav, a_, b_, rd / "whisper_pieces", f"win_{i:03d}")
+    else:
+        log(f"[{streamer}] 2/2 transcribing on this Mac + scanning for loud moments and chat spikes")
+        with cf.ThreadPoolExecutor(2) as ex:
+            fs = ex.submit(transcribe, wav, rd / "whisper")
+            fl = ex.submit(loud_moments, wav)
+            segs = fs.result()
+            loud, _ = fl.result()
+        ranges = None
     chat_file = next(iter(rd.glob("chat*.live_chat.json")), None)
     chat = chat_spikes(chat_file)
     wav.unlink(missing_ok=True)
@@ -370,10 +414,12 @@ def prep_one(url, cookies, force=False):
 
     # ---- 12-minute chunks with signal markers inline
     dur = meta.get("duration") or (segs[-1]["end"] if segs else 0)
-    n = max(1, math.ceil(dur / CHUNK_SEC))
-    for ci in range(n):
-        a, b = ci * CHUNK_SEC, (ci + 1) * CHUNK_SEC
-        lines = [f"# {streamer}: {info['title']}", f"Chunk {ci + 1}/{n}  ({hms(a)} to {hms(b)})",
+    if ranges is None:
+        ranges = [(ci * CHUNK_SEC, (ci + 1) * CHUNK_SEC) for ci in range(max(1, math.ceil(dur / CHUNK_SEC)))]
+    n = len(ranges)
+    for ci, (a, b) in enumerate(ranges):
+        lines = [f"# {streamer}: {info['title']}", f"Chunk {ci + 1}/{n}  ({hms(a)} to {hms(b)})"
+                 + ("  [quick mode: only the minutes around a loud moment]" if quick else ""),
                  "Markers: LOUD(+dB over normal) = streamer got loud. CHAT xN = chat moving N times faster than normal (laughs count double); LAUGH = mostly laughing.", ""]
         for s in segs:
             if s["end"] <= a or s["start"] >= b:
@@ -401,7 +447,7 @@ def cmd_prep(a):
     RUNS.mkdir(parents=True, exist_ok=True)
     results = []
     with cf.ThreadPoolExecutor(a.jobs) as ex:
-        futs = {ex.submit(prep_one, u, a.cookies, a.force): u for u in a.urls}
+        futs = {ex.submit(prep_one, u, a.cookies, a.force, a.quick): u for u in a.urls}
         for f in cf.as_completed(futs):
             try:
                 results.append(f.result())
@@ -770,6 +816,8 @@ def main():
     pr.add_argument("--cookies", help="chrome / safari / firefox, or a cookies.txt path (age-restricted YouTube, Kick)")
     pr.add_argument("--jobs", type=int, default=2, help="streams processed at once (2 is safe on a 16 GB Mac)")
     pr.add_argument("--force", action="store_true")
+    pr.add_argument("--quick", type=int, default=0, metavar="N",
+                    help="fast mode: skip the full transcript, only transcribe around the N loudest moments")
     s = sp.add_parser("status"); s.add_argument("run")
     r = sp.add_parser("render"); r.add_argument("run")
     r.add_argument("--top", type=int, default=3); r.add_argument("--min-score", type=float, default=7.0)
