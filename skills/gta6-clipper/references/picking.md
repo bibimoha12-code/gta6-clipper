@@ -40,6 +40,22 @@ caused it and start the clip there. A `CHAT ... LAUGH` spike with a clear cause 
 
 Most chunks have 0-2 real candidates. Many have none. That's normal: write `[]`.
 
+### The stranger test (apply before giving 7+)
+
+Would someone who has never heard of this streamer stop scrolling for it? What hooks strangers is
+**something happening on screen** plus a reaction: a weird or secret discovery (a Bigfoot, a hidden
+creature, an absurd NPC), chaos, a fail, a death, a crazy chase, a funny NPC interaction, a big
+first-time moment. Talking is not enough.
+
+Capped at 6, however excited the streamer sounds:
+- Praising graphics, detail, interiors, "it looks like a movie / simulation" (the first time in the whole
+  stream can be a 7 only if the reaction is huge; every later one is a 5).
+- Opinions about FPS, performance, settings, menus, controls, release times, the trailers.
+- Explaining mechanics, reading tutorials, shopping, customizing clothes or weapons.
+- Talking to chat about codes, giveaways, other streamers, the stream itself.
+
+When in doubt, it's a 6. Fewer, stronger clips beat three weak ones: if only one moment passes, render one.
+
 ## Boundaries
 
 - 20-60 seconds. Start ON the hook (the first line must grab), not on the build-up 30 seconds earlier.
