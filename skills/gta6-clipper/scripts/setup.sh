@@ -89,9 +89,15 @@ fi
 
 # 6. Face detector model (YuNet, ~230 KB) used to find the facecam box
 YUNET="$MODELS/face_detection_yunet_2023mar.onnx"
+# a real model is ~230 KB; anything tiny is an error page saved by mistake
+[[ -f "$YUNET" && $(wc -c < "$YUNET") -lt 100000 ]] && rm -f "$YUNET"
 if [[ ! -f "$YUNET" ]]; then
   inst "YuNet face detector"
-  curl -L -s -o "$YUNET" https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx || fail "YuNet model"
+  for u in https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx \
+           https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx; do
+    curl -fL -s -o "$YUNET.part" "$u" && [[ $(wc -c < "$YUNET.part") -gt 100000 ]] && mv "$YUNET.part" "$YUNET" && break
+  done
+  rm -f "$YUNET.part"
 fi
 [[ -s "$YUNET" ]] && ok "Face detector" || fail "Face detector"
 
