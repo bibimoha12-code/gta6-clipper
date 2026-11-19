@@ -62,7 +62,7 @@ Clips land in `~/GTA6-Clips/`. Each one has an `.mp4` and a `.txt` with the titl
 | 4. Pick the moments | Claude reads 12-min chunks, best 3 scoring 7+ | Claude reads each 5-min window, any 7.5+ | Claude Code |
 | 5. Make the clip | Downloads only those minutes | Cuts from the pieces already on your Mac | OpenCV, Whisper, Pillow, FFmpeg |
 
-Chat is counted, never read: 10-second buckets, a spike is 8+ messages at 2.5x the normal rate. Loud means 9 dB above the streamer's own normal. The facecam is found by looking for a face, and box edges, that stay still while the gameplay moves.
+Chat is counted, not read for content: 10-second buckets, a spike is 8+ messages at 2.5x the normal rate. Laughing messages (jajaja, KEKW, LUL, 😂) count double, and a spike that is mostly laughter is marked LAUGH so the picker looks 10-20 s before it. Loud means 9 dB above the streamer's own normal. The facecam is found by looking for a face, and box edges, that stay still while the gameplay moves.
 
 ## Run it free
 

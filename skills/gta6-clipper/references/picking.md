@@ -18,6 +18,10 @@ Signals help, they don't decide: `<<LOUD(+NdB)>>` = the streamer got loud. `<<CH
 times faster than normal (chat reacts a few seconds after the moment, so the moment is usually just
 before the marker). A loud line with nothing interesting said is not a clip. A great line with no marker can be.
 
+Chat explosions are the strongest signal: laughing messages ("jajaja", "KEKW", "LUL", 😂, 💀) count double,
+and `<<CHAT xN LAUGH>>` means chat was mostly laughing. Look 10-20 seconds BEFORE that marker for what
+caused it and start the clip there. A `CHAT ... LAUGH` spike with a clear cause is at least a 7.
+
 ## Throw out (score 0, don't include)
 
 - Anything that needs context to make sense (references to something earlier, inside jokes, "like I said").

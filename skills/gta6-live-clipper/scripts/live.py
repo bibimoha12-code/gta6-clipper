@@ -103,20 +103,24 @@ class Daemon:
                         if ln.startswith(b"PING"):
                             s.sendall(b"PONG :tmi.twitch.tv\r\n")
                         elif b" PRIVMSG " in ln and self.t0_wall:
-                            self.chat_times.append(time.time() - self.t0_wall)
+                            text = ln.split(b" :", 1)[-1].decode("utf-8", "ignore")
+                            self.chat_times.append((time.time() - self.t0_wall, g.chat_weight(text)))
             except Exception:
                 time.sleep(10)
 
     def chat_spikes(self, a, b):
-        """10-second bins between a and b vs the trailing 5-minute median."""
+        """10-second bins between a and b vs the trailing 5-minute median; laughs count double."""
         out = []
         t = a - a % 10
+        ev = list(self.chat_times)
         while t < b:
-            c = sum(1 for x in self.chat_times if t <= x < t + 10)
-            hist = [sum(1 for x in self.chat_times if u <= x < u + 10) for u in range(int(t - 300), int(t), 10)]
+            inbin = [w for x, w in ev if t <= x < t + 10]
+            c = sum(inbin)
+            hist = [sum(w for x, w in ev if u <= x < u + 10) for u in range(int(t - 300), int(t), 10)]
             base = max(1.0, statistics.median(hist)) if hist else 1.0
             if c >= 8 and c / base >= 2.5:
-                out.append({"start": t, "end": t + 10, "x": round(c / base, 1)})
+                out.append({"start": t, "end": t + 10, "x": round(c / base, 1),
+                            "laugh": sum(w for w in inbin if w > 1) >= c * 0.5})
             t += 10
         return out
 
@@ -172,12 +176,12 @@ class Daemon:
             chat = self.chat_spikes(a, b)
             lines = [f"# LIVE {self.cfg.get('streamer')}: {self.cfg.get('title')}",
                      f"Window {k + 1}  ({g.hms(a)} to {g.hms(b)} of the recording)",
-                     "Markers: LOUD(+dB over normal) = streamer got loud. CHAT xN = chat moving N times faster than normal.", ""]
+                     "Markers: LOUD(+dB over normal) = streamer got loud. CHAT xN = chat moving N times faster than normal (laughs count double); LAUGH = mostly laughing.", ""]
             for s in self.transcript:
                 if s["end"] <= a or s["start"] >= b:
                     continue
                 tags = [f"LOUD(+{e['db']:.0f}dB)" for e in self.loud if e["start"] <= s["end"] and e["end"] + 1 >= s["start"]][:1]
-                tags += [f"CHAT x{e['x']}" for e in chat if e["start"] - 15 <= s["end"] and e["end"] >= s["start"]][:1]
+                tags += [f"CHAT x{e['x']}" + (" LAUGH" if e.get("laugh") else "") for e in chat if e["start"] - 15 <= s["end"] and e["end"] >= s["start"]][:1]
                 lines.append(f"[{g.hms(s['start'])}] {s['text']}" + (f"   <<{' '.join(tags)}>>" if tags else ""))
             (self.rd / "windows" / f"window_{k + 1:03d}.md").write_text("\n".join(lines) + "\n")
             k += 1

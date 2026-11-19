@@ -196,32 +196,62 @@ def loud_moments(wav):
     return merged, vals
 
 
-def chat_spikes(chat_file):
-    """YouTube replay chat: messages per 10 s vs the local baseline."""
-    if not chat_file or not Path(chat_file).exists():
+LAUGH_RE = re.compile(r"(?:[jx][aeiou]){2,}|(?:h[ae]){2,}|j[sk]j[sk]|\bxd+\b|\blo+l\b|\blmao|\blmfao|kekw|omegalul|"
+                      r"\blul\b|icant|😂|🤣|💀|😭", re.I)
+
+
+def chat_weight(text):
+    """A laughing message counts double: a chat full of 'jajaja' marks a funny moment."""
+    return 2 if LAUGH_RE.search(text or "") else 1
+
+
+def spikes_from(events, end=None):
+    """events: (stream_seconds, weight). 10-second bins of weighted messages vs the local baseline.
+    A spike is 8+ weighted messages at 2.5x normal; `laugh` marks one that is mostly laughter."""
+    events = [(t, w) for t, w in events if t >= 0]
+    if not events:
         return []
-    times = []
-    with open(chat_file) as f:
-        for line in f:
-            try:
-                ms = json.loads(line)["replayChatItemAction"]["videoOffsetTimeMsec"]
-                times.append(int(ms) / 1000)
-            except Exception:
-                pass
-    if len(times) < 50:
-        return []
-    nb = int(max(times) // 10) + 1
-    bins = [0] * nb
-    for t in times:
-        if t >= 0:
-            bins[int(t // 10)] += 1
+    nb = int((end or max(t for t, _ in events)) // 10) + 1
+    bins, laughs = [0] * nb, [0] * nb
+    for t, w in events:
+        i = int(t // 10)
+        if i < nb:
+            bins[i] += w
+            laughs[i] += w if w > 1 else 0
     out = []
     for i, c in enumerate(bins):
         lo, hi = max(0, i - 30), min(nb, i + 30)
         base = max(1.0, statistics.median(bins[lo:hi]))
         if c >= 8 and c / base >= 2.5:
-            out.append({"start": i * 10, "end": i * 10 + 10, "x": round(c / base, 1), "msgs": c})
+            out.append({"start": i * 10, "end": i * 10 + 10, "x": round(c / base, 1), "msgs": c,
+                        "laugh": laughs[i] >= c * 0.5})
     return out
+
+
+def chat_spikes(chat_file):
+    """YouTube replay chat: weighted messages per 10 s vs the local baseline."""
+    if not chat_file or not Path(chat_file).exists():
+        return []
+    events = []
+    with open(chat_file) as f:
+        for line in f:
+            try:
+                a = json.loads(line)["replayChatItemAction"]
+                ms = int(a["videoOffsetTimeMsec"])
+            except Exception:
+                continue
+            text = ""
+            try:
+                item = a["actions"][0]["addChatItemAction"]["item"]
+                r = item.get("liveChatTextMessageRenderer") or item.get("liveChatPaidMessageRenderer") or {}
+                for run_ in r.get("message", {}).get("runs", []):
+                    text += run_.get("text") or "".join(run_.get("emoji", {}).get("shortcuts", [])[:1])
+            except Exception:
+                pass
+            events.append((ms / 1000, chat_weight(text)))
+    if len(events) < 50:
+        return []
+    return spikes_from(events)
 
 
 PIECE_SEC = 10 * 60
@@ -344,7 +374,7 @@ def prep_one(url, cookies, force=False):
     for ci in range(n):
         a, b = ci * CHUNK_SEC, (ci + 1) * CHUNK_SEC
         lines = [f"# {streamer}: {info['title']}", f"Chunk {ci + 1}/{n}  ({hms(a)} to {hms(b)})",
-                 "Markers: LOUD(+dB over normal) = streamer got loud. CHAT xN = chat moving N times faster than normal.", ""]
+                 "Markers: LOUD(+dB over normal) = streamer got loud. CHAT xN = chat moving N times faster than normal (laughs count double); LAUGH = mostly laughing.", ""]
         for s in segs:
             if s["end"] <= a or s["start"] >= b:
                 continue
@@ -355,7 +385,7 @@ def prep_one(url, cookies, force=False):
                     break
             for e in chat:  # chat reacts a few seconds late
                 if e["start"] - 15 <= s["end"] and e["end"] >= s["start"]:
-                    tags.append(f"CHAT x{e['x']}")
+                    tags.append(f"CHAT x{e['x']}" + (" LAUGH" if e.get("laugh") else ""))
                     break
             lines.append(f"[{hms(s['start'])}] {s['text']}" + (f"   <<{' '.join(tags)}>>" if tags else ""))
         (rd / "chunks" / f"chunk_{ci + 1:02d}.md").write_text("\n".join(lines) + "\n")
