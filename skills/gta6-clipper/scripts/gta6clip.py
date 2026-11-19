@@ -184,15 +184,15 @@ def loud_moments(wav):
         lo, hi = max(0, i - W), min(len(vals), i + W)
         base = statistics.median(vals[lo:hi])
         if v - base >= 9:
-            events.append((i, round(v - base, 1)))
+            events.append((i, round(v - base, 1), base))
     # merge consecutive seconds into events
     merged = []
-    for t, d in events:
+    for t, d, bs in events:
         if merged and t - merged[-1]["end"] <= 2:
             merged[-1]["end"] = t
             merged[-1]["db"] = max(merged[-1]["db"], d)
         else:
-            merged.append({"start": t, "end": t, "db": d})
+            merged.append({"start": t, "end": t, "db": d, "base": round(bs, 1)})
     return merged, vals
 
 
@@ -289,24 +289,18 @@ def transcribe_range(wav, a, b, pdir, name):
     return [{"start": sg["start"] + a, "end": sg["end"] + a, "text": sg["text"]} for sg in json.loads(done.read_text())]
 
 
-def quick_windows(loud, n, dur=None, before=90, after=60, gap=180):
-    """Pick the n strongest loud moments (longer + louder first), at least `gap` s apart, and return
-    merged [start, end) windows around them, in stream order."""
-    ranked = sorted(loud, key=lambda e: e["db"] + min(e["end"] - e["start"], 6), reverse=True)
-    chosen = []
-    for e in ranked:
-        if all(abs(e["start"] - c["start"]) >= gap for c in chosen):
-            chosen.append(e)
-        if len(chosen) >= n:
-            break
-    wins = sorted((max(0, e["start"] - before), min(dur or 1e9, e["end"] + after)) for e in chosen)
-    merged = []
-    for a, b in wins:
-        if merged and a <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
-        else:
-            merged.append((a, b))
-    return merged
+def quick_candidates(loud):
+    """Loud moments worth a look, strongest first. A real yell rises 9-30 dB over the streamer's normal
+    talking level; a jump of 30+ dB, or one from a near-silent baseline, is music or a cutscene starting
+    after a quiet stretch, not a reaction."""
+    real = [e for e in loud if e["db"] <= 30 and e.get("base", -30) >= -45]
+    return sorted(real, key=lambda e: e["db"] + min(e["end"] - e["start"], 6), reverse=True)
+
+
+def spoken_words(segs):
+    """Words actually said (whisper tags like [MÚSICA], (música), *risa* don't count)."""
+    txt = " ".join(re.sub(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*|♪[^♪]*♪?", " ", s["text"]) for s in segs)
+    return len(re.findall(r"\w{2,}", txt))
 
 
 def transcribe(wav, out_base, words=False):
@@ -392,11 +386,26 @@ def prep_one(url, cookies, force=False, quick=0):
     if quick:
         log(f"[{streamer}] 2/2 quick mode: finding the loudest moments, transcribing only around the top {quick}")
         loud, _ = loud_moments(wav)
-        ranges = quick_windows(loud, quick, meta.get("duration"))
-        segs = []
-        for i, (a_, b_) in enumerate(ranges):
-            log(f"    window {i + 1}/{len(ranges)}  {hms(a_)}-{hms(b_)}")
-            segs += transcribe_range(wav, a_, b_, rd / "whisper_pieces", f"win_{i:03d}")
+        dur_ = meta.get("duration") or 1e9
+        ranges, segs, tried = [], [], 0
+        for e in quick_candidates(loud):
+            if len(ranges) >= quick or tried >= quick * 3:
+                break
+            if any(abs(e["start"] - (a_ + 90)) < 180 for a_, _ in ranges):
+                continue
+            tried += 1
+            a_, b_ = max(0, e["start"] - 90), min(dur_, e["end"] + 60)
+            part = transcribe_range(wav, a_, b_, rd / "whisper_pieces", f"win_{int(a_)}")
+            near = [sg for sg in part if sg["end"] >= e["start"] - 30 and sg["start"] <= e["end"] + 30]
+            if spoken_words(near) < 15:  # nobody is talking around the peak: music / cutscene
+                log(f"    skip {hms(e['start'])} (+{e['db']:.0f} dB): no speech around it")
+                continue
+            log(f"    window {len(ranges) + 1}/{quick}  {hms(a_)}-{hms(b_)}  (+{e['db']:.0f} dB)")
+            ranges.append((a_, b_))
+            segs += part
+        order = sorted(range(len(ranges)), key=lambda i: ranges[i][0])
+        ranges = [ranges[i] for i in order]
+        segs.sort(key=lambda sg: sg["start"])
     else:
         log(f"[{streamer}] 2/2 transcribing on this Mac + scanning for loud moments and chat spikes")
         with cf.ThreadPoolExecutor(2) as ex:
