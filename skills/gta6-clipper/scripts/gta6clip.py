@@ -224,9 +224,13 @@ def chat_spikes(chat_file):
     return out
 
 
-def transcribe(wav, out_base, words=False):
+PIECE_SEC = 10 * 60
+
+
+def _whisper(wav, out_base, words=False):
     model = CFG.get("whisper_model") or os.path.expanduser("~/.cache/whisper-cpp/ggml-small.bin")
-    cmd = [CFG.get("whisper_cli") or "whisper-cli", "-m", model, "-f", str(wav), "-l", CFG.get("whisper_lang") or "en", "-np", "-mc", "0", "-oj", "-of", str(out_base)]
+    cmd = [CFG.get("whisper_cli") or "whisper-cli", "-m", model, "-f", str(wav), "-l", CFG.get("whisper_lang") or "en",
+           "-t", str(max(1, (os.cpu_count() or 4))), "-np", "-mc", "0", "-oj", "-of", str(out_base)]
     if words:
         cmd += ["-ml", "1", "-sow", "-ojf"]
     r = run(cmd)
@@ -238,6 +242,30 @@ def transcribe(wav, out_base, words=False):
         txt = s.get("text", "").strip()
         if txt:
             segs.append({"start": s["offsets"]["from"] / 1000, "end": s["offsets"]["to"] / 1000, "text": txt})
+    return segs
+
+
+def transcribe(wav, out_base, words=False):
+    """Long audio is transcribed in 10-minute pieces, each saved as it finishes, so an interrupted
+    prep picks up where it stopped instead of starting the whole stream again."""
+    dur = (Path(wav).stat().st_size - 44) / 32000  # 16 kHz mono s16 wav
+    if words or dur <= 1.5 * PIECE_SEC:
+        return _whisper(wav, out_base, words)
+    pdir = Path(f"{out_base}_pieces")
+    pdir.mkdir(exist_ok=True)
+    segs, n = [], math.ceil(dur / PIECE_SEC)
+    for i in range(n):
+        done = pdir / f"piece_{i:03d}.done.json"
+        if not done.exists():
+            log(f"    transcribing piece {i + 1}/{n}")
+            pw = pdir / f"piece_{i:03d}.wav"
+            run(["ffmpeg", "-y", "-loglevel", "error", "-ss", str(i * PIECE_SEC), "-t", str(PIECE_SEC),
+                 "-i", str(wav), "-c", "copy", str(pw)])
+            part = _whisper(pw, pdir / f"piece_{i:03d}")
+            pw.unlink(missing_ok=True)
+            done.write_text(json.dumps(part))
+        for sg in json.loads(done.read_text()):
+            segs.append({"start": sg["start"] + i * PIECE_SEC, "end": sg["end"] + i * PIECE_SEC, "text": sg["text"]})
     return segs
 
 
@@ -276,21 +304,25 @@ def prep_one(url, cookies, force=False):
         log(f"[{streamer}] already prepped -> {rd}")
         return {"run": str(rd), "streamer": streamer, "cached": True}
 
-    log(f"[{streamer}] 1/2 downloading audio only ({hms(meta.get('duration') or 0)} stream)")
-    is_yt = "youtube" in (meta.get("extractor_key") or "").lower()
-    with cf.ThreadPoolExecutor(2) as ex:
-        fa = ex.submit(download_audio, url, cookies, rd, meta)
-        fc = ex.submit(run, YTDLP + cookie_args(cookies) + ["--no-playlist", "--skip-download", "--write-subs",
-                                                             "--sub-langs", "live_chat", "-o", str(rd / "chat"), url]) if is_yt else None
-        ra = fa.result()
-        if fc:
-            fc.result()
-    src = next((p for p in rd.glob("audio.*") if p.suffix not in (".part", ".ytdl", ".wav")), None)
-    if not src:
-        raise RuntimeError(f"audio download failed: {ra.stderr[-300:]}")
     wav = rd / "audio.wav"
-    run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-ac", "1", "-ar", "16000", str(wav)])
-    src.unlink(missing_ok=True)
+    is_yt = "youtube" in (meta.get("extractor_key") or "").lower()
+    if wav.exists():
+        log(f"[{streamer}] 1/2 audio already downloaded, resuming")
+    else:
+        log(f"[{streamer}] 1/2 downloading audio only ({hms(meta.get('duration') or 0)} stream)")
+        with cf.ThreadPoolExecutor(2) as ex:
+            fa = ex.submit(download_audio, url, cookies, rd, meta)
+            fc = ex.submit(run, YTDLP + cookie_args(cookies) + ["--no-playlist", "--skip-download", "--write-subs",
+                                                                 "--sub-langs", "live_chat", "-o", str(rd / "chat"), url]) if is_yt else None
+            ra = fa.result()
+            if fc:
+                fc.result()
+        src = next((p for p in rd.glob("audio.*") if p.suffix not in (".part", ".ytdl", ".wav")), None)
+        if not src:
+            raise RuntimeError(f"audio download failed: {ra.stderr[-300:]}")
+        run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-ac", "1", "-ar", "16000", "-f", "wav", str(rd / "audio.wav.part")])
+        (rd / "audio.wav.part").rename(wav)  # only a complete wav counts as downloaded
+        src.unlink(missing_ok=True)
     t_dl = time.time()
 
     log(f"[{streamer}] 2/2 transcribing on this Mac + scanning for loud moments and chat spikes")
