@@ -543,7 +543,7 @@ def cmd_status(a):
 
 
 # ---------------------------------------------------------------- render (step 4)
-def select(rd, top, min_score):
+def select(rd, top, min_score, max_sec=75):
     segs = json.loads((rd / "transcript.json").read_text())
     cands = []
     for p in sorted((rd / "picks").glob("chunk_*.json")):
@@ -561,8 +561,8 @@ def select(rd, top, min_score):
         # snap to sentence boundaries so clips don't start/end mid-word
         st = max([s["start"] for s in segs if s["start"] <= c["_s"] + 0.5] or [c["_s"]])
         en = min([s["end"] for s in segs if s["end"] >= c["_e"] - 0.5] or [c["_e"]])
-        if en - st > 75:
-            en = st + 75
+        if en - st > max_sec:
+            en = st + max_sec
         if en - st < 12:
             continue
         if any(not (en + 20 < o["_s"] or st > o["_e"] + 20) for o in ok):
@@ -902,7 +902,7 @@ def cmd_render(a):
     rd = Path(a.run)
     info = json.loads((rd / "stream.json").read_text())
     t0 = time.time()
-    picks, total = select(rd, a.top, a.min_score)
+    picks, total = select(rd, a.top, a.min_score, a.max_sec)
     log(f"[{info['streamer']}] {total} possible moments -> keeping best {len(picks)}")
     made = []
     for n, c in enumerate(picks, 1):
@@ -924,6 +924,88 @@ def cmd_render(a):
         f"(total {summary['total_time']}) -> {rd / 'clips'}")
 
 
+# ---------------------------------------------------------------- daily shorts
+def cmd_daily(a):
+    """Newest GTA 6 archive of each channel that started within --hours, longest first, then prep them."""
+    now, found = time.time(), []
+    for ch in [c.strip().lower() for c in a.channels.split(",") if c.strip()]:
+        try:
+            r = run(YTDLP + ["-I", "1:2", "--print", "%(id)s|%(timestamp)s|%(duration)s|%(title)s",
+                             f"https://www.twitch.tv/{ch}/videos?filter=archives&sort=time"], timeout=180)
+        except subprocess.TimeoutExpired:
+            log(f"  {ch}: timed out")
+            continue
+        for ln in r.stdout.strip().splitlines():
+            try:
+                vid, ts, dur, title = ln.split("|", 3)
+                ts, dur = float(ts), float(dur)
+            except ValueError:
+                continue
+            if now - ts > a.hours * 3600 or dur < 45 * 60 or not GTA_RE.search(title):
+                continue
+            found.append({"channel": ch, "url": f"https://www.twitch.tv/videos/{vid.lstrip('v')}",
+                          "duration": dur, "title": title})
+            break  # one stream per channel
+        log(f"  {ch}: {'GTA stream found' if found and found[-1]['channel'] == ch else 'nothing new'}")
+    found.sort(key=lambda f: -f["duration"])
+    found = found[:a.max_streams]
+    if not found:
+        log("No new GTA 6 streams in the window.")
+        return
+    if a.dry_run:
+        for f in found:
+            log(f"  would prep {f['channel']}: {f['url']}  {hms(f['duration'])}  {f['title'][:60]}")
+        return
+    log(f"Prepping {len(found)}: " + ", ".join(f"{f['channel']} ({hms(f['duration'])})" for f in found))
+    RUNS.mkdir(parents=True, exist_ok=True)
+    with cf.ThreadPoolExecutor(a.jobs) as ex:
+        futs = {ex.submit(prep_one, f["url"], None, False, a.quick, False): f for f in found}
+        for fu in cf.as_completed(futs):
+            try:
+                r = fu.result()
+                log(f"RUN {r.get('run')}")
+            except Exception as e:
+                log(f"FAILED {futs[fu]['url']}: {e}")
+
+
+def cmd_schedule(a):
+    """Rank every rendered clip of the given runs by score and lay out the day's posting slots."""
+    clips = []
+    for rd in map(Path, a.runs):
+        sm = rd / "clips" / "summary.json"
+        if not sm.exists():
+            continue
+        info = json.loads(sm.read_text())
+        for c in info.get("clips", []):
+            if Path(c["file"]).exists():
+                clips.append({**c, "streamer": info["streamer"]})
+    clips.sort(key=lambda c: -float(c.get("score") or 0))
+    slots = [x.strip() for x in a.slots.split(",")]
+    out = Path(a.out) if a.out else RUNS / "shorts" / str(dt.date.today())
+    out.mkdir(parents=True, exist_ok=True)
+    # spread streamers: never two clips of the same streamer in one slot when avoidable
+    plan = {sl: [] for sl in slots}
+    for c in clips[:len(slots) * a.per_slot]:
+        free = [sl for sl in slots if len(plan[sl]) < a.per_slot]
+        best = min(free, key=lambda sl: (sum(x["streamer"] == c["streamer"] for x in plan[sl]), slots.index(sl)))
+        plan[best].append(c)
+    lines = [f"# Shorts {dt.date.today()}", ""]
+    for sl in slots:
+        lines.append(f"## {sl}")
+        for i, c in enumerate(plan[sl], 1):
+            src = Path(c["file"])
+            dst = out / f"{sl.replace(':', '')}_{i}_{src.name.split('_', 2)[-1]}"
+            shutil.copy2(src, dst)
+            txt = src.with_suffix(".txt")
+            if txt.exists():
+                shutil.copy2(txt, dst.with_suffix(".txt"))
+            lines.append(f"- {dst.name}  [{c['streamer']}, score {c.get('score')}, {c.get('len')} s]")
+        lines.append("")
+    (out / "schedule.md").write_text("\n".join(lines))
+    log("\n".join(lines))
+    log(f"-> {out}")
+
+
 # ---------------------------------------------------------------- main
 def main():
     if not (SKILL / ".ready").exists():
@@ -943,8 +1025,22 @@ def main():
     r = sp.add_parser("render"); r.add_argument("run")
     r.add_argument("--top", type=int, default=3); r.add_argument("--min-score", type=float, default=7.0)
     r.add_argument("--cookies"); r.add_argument("--keep", action="store_true", help="keep downloaded source sections")
+    r.add_argument("--max-sec", type=float, default=75, help="longest clip in seconds (59 for Shorts)")
+    dl = sp.add_parser("daily", help="find yesterday's GTA 6 Twitch streams of a channel list and prep them")
+    dl.add_argument("--channels", required=True, help="comma-separated Twitch logins")
+    dl.add_argument("--hours", type=float, default=30, help="only streams that started in the last N hours")
+    dl.add_argument("--max-streams", type=int, default=4)
+    dl.add_argument("--quick", type=int, default=15)
+    dl.add_argument("--jobs", type=int, default=2)
+    dl.add_argument("--dry-run", action="store_true", help="only list the streams that would be prepped")
+    sc = sp.add_parser("schedule", help="pick the best rendered clips of several runs and assign posting slots")
+    sc.add_argument("runs", nargs="+")
+    sc.add_argument("--slots", default="09:00,15:00,21:00")
+    sc.add_argument("--per-slot", type=int, default=3)
+    sc.add_argument("--out", help="folder for the day's shorts (default ~/GTA6-Clips/shorts/<date>)")
     a = p.parse_args()
-    {"discover": cmd_discover, "prep": cmd_prep, "status": cmd_status, "render": cmd_render}[a.cmd](a)
+    {"discover": cmd_discover, "prep": cmd_prep, "status": cmd_status, "render": cmd_render,
+     "daily": cmd_daily, "schedule": cmd_schedule}[a.cmd](a)
 
 
 if __name__ == "__main__":
