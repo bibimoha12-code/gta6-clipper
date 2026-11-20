@@ -13,7 +13,7 @@ Step 3 (picking) is done by the Claude Code session itself (no API keys); see SK
 Run with the skill's venv:  .venv/bin/python scripts/gta6clip.py <command>
 """
 import argparse, concurrent.futures as cf, datetime as dt, json, math, os, re, shutil
-import statistics, subprocess, sys, time, urllib.request
+import statistics, subprocess, sys, time, urllib.parse, urllib.request
 from pathlib import Path
 
 SKILL = Path(__file__).resolve().parent.parent
@@ -386,7 +386,7 @@ def download_audio(url, cookies, rd, meta):
     """Audio-only download. Twitch VODs are HLS: hand the playlist straight to ffmpeg, reading from the
     first segment (a VOD that is still recording is an EVENT playlist, which yt-dlp would fetch at
     real-time speed). Everything else goes through yt-dlp."""
-    if "twitch" in (meta.get("extractor_key") or "").lower():
+    if any(k in (meta.get("extractor_key") or "").lower() for k in ("twitch", "kick")):
         g = run(YTDLP + cookie_args(cookies) + ["-f", "Audio_Only/audio_only/worst", "-g", url])
         hls = g.stdout.strip().splitlines()[-1] if g.returncode == 0 and g.stdout.strip() else ""
         if hls:
@@ -801,7 +801,8 @@ def twitch_section(url, cookies, a, b, work):
         last_init = None
         for _, ini, seg in picked:
             for part in ([ini] if ini and ini != last_init else []) + [seg]:
-                r = subprocess.run(["curl", "-fsSL", "--retry", "3", base + part], capture_output=True)
+                r = subprocess.run(["curl", "-fsSL", "--retry", "3", urllib.parse.urljoin(base, part)],
+                                   capture_output=True)
                 if r.returncode != 0:
                     return None
                 out.write(r.stdout)
@@ -826,7 +827,7 @@ def render_one(rd, info, c, n, cookies, keep, local_src=None, src_start=None):
     src = Path(local_src) if local_src is not None else next(work.glob("src.*"), None)
     if src and (work / "src_start.txt").exists():
         a = float((work / "src_start.txt").read_text())
-    if not src and "twitch" in (info.get("platform") or "").lower():
+    if not src and any(k in (info.get("platform") or "").lower() for k in ("twitch", "kick")):
         got = twitch_section(info["webpage_url"], cookies, a, b, work)
         if got is not None:
             src, a = got
@@ -929,21 +930,25 @@ def cmd_daily(a):
     """Newest GTA 6 archive of each channel that started within --hours, longest first, then prep them."""
     now, found = time.time(), []
     for ch in [c.strip().lower() for c in a.channels.split(",") if c.strip()]:
+        site, _, login = ch.rpartition(":")
+        site = site or "twitch"
+        listing = (f"https://kick.com/{login}/videos" if site == "kick"
+                   else f"https://www.twitch.tv/{login}/videos?filter=archives&sort=time")
         try:
-            r = run(YTDLP + ["-I", "1:2", "--print", "%(id)s|%(timestamp)s|%(duration)s|%(title)s",
-                             f"https://www.twitch.tv/{ch}/videos?filter=archives&sort=time"], timeout=180)
+            r = run(YTDLP + ["-I", "1:2", "--print", "%(id)s|%(timestamp)s|%(duration)s|%(webpage_url)s|%(title)s",
+                             listing], timeout=180)
         except subprocess.TimeoutExpired:
             log(f"  {ch}: timed out")
             continue
         for ln in r.stdout.strip().splitlines():
             try:
-                vid, ts, dur, title = ln.split("|", 3)
+                vid, ts, dur, page, title = ln.split("|", 4)
                 ts, dur = float(ts), float(dur)
             except ValueError:
                 continue
             if now - ts > a.hours * 3600 or dur < 45 * 60 or not GTA_RE.search(title):
                 continue
-            found.append({"channel": ch, "url": f"https://www.twitch.tv/videos/{vid.lstrip('v')}",
+            found.append({"channel": ch, "url": page.split("#", 1)[0],
                           "duration": dur, "title": title})
             break  # one stream per channel
         log(f"  {ch}: {'GTA stream found' if found and found[-1]['channel'] == ch else 'nothing new'}")
@@ -1027,7 +1032,7 @@ def main():
     r.add_argument("--cookies"); r.add_argument("--keep", action="store_true", help="keep downloaded source sections")
     r.add_argument("--max-sec", type=float, default=75, help="longest clip in seconds (59 for Shorts)")
     dl = sp.add_parser("daily", help="find yesterday's GTA 6 Twitch streams of a channel list and prep them")
-    dl.add_argument("--channels", required=True, help="comma-separated Twitch logins")
+    dl.add_argument("--channels", required=True, help="comma-separated Twitch logins; prefix kick: for Kick")
     dl.add_argument("--hours", type=float, default=30, help="only streams that started in the last N hours")
     dl.add_argument("--max-streams", type=int, default=4)
     dl.add_argument("--quick", type=int, default=15)
