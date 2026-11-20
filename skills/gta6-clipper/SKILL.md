@@ -40,7 +40,7 @@ replays) where chat sped up, and writes `chunks/chunk_NN.md`: 12-minute pieces w
 
 ## 3. Pick the moments (you do this)
 
-Read `references/picking.md` first, every time. Then for each run folder:
+Read `references/picking.md` and `references/learnings.md` first, every time. Then for each run folder:
 
 1. Read every `chunks/chunk_NN.md`, one at a time, in order.
 2. For each chunk write `picks/chunk_NN.json` (same NN): a JSON array of candidate moments, `[]` if
