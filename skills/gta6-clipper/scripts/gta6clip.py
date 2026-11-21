@@ -999,12 +999,17 @@ def cmd_schedule(a):
         lines.append(f"## {sl}")
         for i, c in enumerate(plan[sl], 1):
             src = Path(c["file"])
-            dst = out / f"{sl.replace(':', '')}_{i}_{src.name.split('_', 2)[-1]}"
+            # the file name is the Short's title: YouTube uses it as the default title on upload,
+            # so the publish run can find each video and its slot without any other record
+            title = re.sub(r"\s+", " ", re.sub(r'[\\/:*?"<>|]+', " ", c.get("title") or src.stem)).strip()[:90]
+            dst = out / f"{sl.replace(':', '')} · {title}.mp4"
             shutil.copy2(src, dst)
             txt = src.with_suffix(".txt")
             if txt.exists():
                 shutil.copy2(txt, dst.with_suffix(".txt"))
             lines.append(f"- {dst.name}  [{c['streamer']}, score {c.get('score')}, {c.get('len')} s]")
+            if txt.exists():
+                lines.append("  " + txt.read_text().replace("\n", "\n  ").strip())
         lines.append("")
     (out / "schedule.md").write_text("\n".join(lines))
     log("\n".join(lines))
